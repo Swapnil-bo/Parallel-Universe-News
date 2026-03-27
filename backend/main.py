@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
+from pathlib import Path
 import requests
 import json
 import re
@@ -9,14 +10,14 @@ from datetime import date
 from typing import Optional
 import time
 
-# ── Logging ─────────────────────────────────────────────────────────────────
+# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 log = logging.getLogger(__name__)
 
-# ── App ──────────────────────────────────────────────────────────────────────
+# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Parallel Universe News API", version="2.0.0")
 
 app.add_middleware(
@@ -26,14 +27,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Config ───────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 OLLAMA_URL   = "http://localhost:11434/api/generate"
 OLLAMA_TAGS  = "http://localhost:11434/api/tags"
 MODEL        = "mistral:7b-instruct"
 MAX_RETRIES  = 3
-TIMEOUT      = 120  # seconds
+TIMEOUT      = 120
+HISTORY_FILE = Path("history.json")
 
-# ── Request schema ───────────────────────────────────────────────────────────
+# ── History helpers ───────────────────────────────────────────────────────────
+def load_history() -> list:
+    try:
+        if HISTORY_FILE.exists():
+            return json.loads(HISTORY_FILE.read_text())
+        return []
+    except Exception:
+        return []
+
+def save_history(history: list):
+    try:
+        HISTORY_FILE.write_text(json.dumps(history, indent=2))
+    except Exception as e:
+        log.error(f"Failed to save history: {e}")
+
+# ── Request schemas ───────────────────────────────────────────────────────────
 class EventRequest(BaseModel):
     event: str
 
@@ -47,7 +64,14 @@ class EventRequest(BaseModel):
             raise ValueError("Event description too long (max 300 chars)")
         return v
 
-# ── Prompt builder ───────────────────────────────────────────────────────────
+class HistoryItem(BaseModel):
+    event: str
+    universeId: str
+    headlines: list
+    timestamp: str
+    generationTime: str
+
+# ── Prompt builder ────────────────────────────────────────────────────────────
 def build_prompt(event: str, strict: bool = False) -> str:
     today = date.today().strftime("%B %d, %Y")
     strictness = (
@@ -61,6 +85,7 @@ def build_prompt(event: str, strict: bool = False) -> str:
 
 Generate exactly 6 news headlines dated TODAY ({today}) from this alternate timeline.
 Make them feel like real, varied journalism — mix breaking news, analysis, and human interest.
+Each headline must have a SINGLE category word only: POLITICS, TECH, SCIENCE, WORLD, ECONOMY, or CULTURE.
 
 {strictness}
 
@@ -68,23 +93,19 @@ Make them feel like real, varied journalism — mix breaking news, analysis, and
   {{
     "headline": "Punchy, attention-grabbing headline",
     "blurb": "2-3 sentences of real-feeling journalism with specific details.",
-    "category": "POLITICS | TECH | SCIENCE | WORLD | ECONOMY | CULTURE",
+    "category": "POLITICS",
     "outlet": "Fictional but believable outlet name (e.g. The Meridian Post)"
   }}
 ]"""
 
 # ── JSON repair ───────────────────────────────────────────────────────────────
 def extract_json(raw: str) -> Optional[list]:
-    """Try multiple strategies to extract valid JSON from messy LLM output."""
-
-    # Strategy 1: clean and direct parse
     cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
 
-    # Strategy 2: find first [ ... ] block via regex
     match = re.search(r'\[.*\]', cleaned, re.DOTALL)
     if match:
         try:
@@ -92,14 +113,12 @@ def extract_json(raw: str) -> Optional[list]:
         except json.JSONDecodeError:
             pass
 
-    # Strategy 3: fix trailing commas before ] or }
     fixed = re.sub(r',\s*([\]}])', r'\1', cleaned)
     try:
         return json.loads(fixed)
     except json.JSONDecodeError:
         pass
 
-    # Strategy 4: extract individual objects and build array manually
     objects = re.findall(r'\{[^{}]+\}', cleaned, re.DOTALL)
     if objects:
         try:
@@ -126,7 +145,7 @@ def call_ollama(prompt: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ollama error: {str(e)}")
 
-# ── Validate headline shape ───────────────────────────────────────────────────
+# ── Validate headlines ────────────────────────────────────────────────────────
 def validate_headlines(data: list) -> bool:
     required = {"headline", "blurb", "category", "outlet"}
     return (
@@ -135,16 +154,14 @@ def validate_headlines(data: list) -> bool:
         all(isinstance(h, dict) and required.issubset(h.keys()) for h in data)
     )
 
-# ── Main endpoint ─────────────────────────────────────────────────────────────
+# ── Generate endpoint ─────────────────────────────────────────────────────────
 @app.post("/generate")
 async def generate_headlines(request: EventRequest):
     log.info(f"Generating headlines for event: '{request.event}'")
-    last_error = None
 
     for attempt in range(1, MAX_RETRIES + 1):
-        strict = attempt > 1  # stricter prompt on retries
+        strict = attempt > 1
         prompt = build_prompt(request.event, strict=strict)
-
         log.info(f"Attempt {attempt}/{MAX_RETRIES} — strict={strict}")
         start = time.time()
 
@@ -164,14 +181,34 @@ async def generate_headlines(request: EventRequest):
                 "attempt": attempt
             }
 
-        last_error = f"Invalid or unparseable JSON on attempt {attempt}"
-        log.warning(f"{last_error}. Raw snippet: {raw[:200]}")
+        log.warning(f"Invalid JSON on attempt {attempt}. Raw snippet: {raw[:200]}")
 
     log.error(f"All {MAX_RETRIES} attempts failed for event: '{request.event}'")
     raise HTTPException(
         status_code=422,
         detail=f"Model returned malformed output after {MAX_RETRIES} attempts. Try rephrasing your event."
     )
+
+# ── History endpoints ─────────────────────────────────────────────────────────
+@app.get("/history")
+async def get_history():
+    return {"history": load_history()}
+
+@app.post("/history")
+async def add_to_history(item: HistoryItem):
+    history = load_history()
+    history = [h for h in history if h.get("event") != item.event]
+    history.insert(0, item.dict())
+    history = history[:50]
+    save_history(history)
+    log.info(f"History saved: {item.universeId} — total {len(history)} entries")
+    return {"status": "saved", "total": len(history)}
+
+@app.delete("/history")
+async def clear_history():
+    save_history([])
+    log.info("History cleared")
+    return {"status": "cleared"}
 
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health")
