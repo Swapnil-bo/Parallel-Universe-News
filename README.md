@@ -20,11 +20,13 @@ Built as **Day X of my 100 Days of Vibe Coding** challenge.
 
 ## 🎬 Demo
 
-> *(insert screen recording or GIF here)*
+![](./screenshots/screenshot-hero.png)
 
-| Empty State | Generating | Headlines |
-|---|---|---|
-| ![](./screenshots/empty.png) | ![](./screenshots/loading.png) | ![](./screenshots/headlines.png) |
+![](./screenshots/screenshot-grid.png)
+
+![](./screenshots/screenshot-featured.png)
+
+![](./screenshots/screenshot-category-filter.png)
 
 ---
 
