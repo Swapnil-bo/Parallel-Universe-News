@@ -22,9 +22,15 @@ Built as **Day X of my 100 Days of Vibe Coding** challenge.
 
 ![](./screenshots/screenshot-hero.png)
 
+---
+
 ![](./screenshots/screenshot-grid.png)
 
+---
+
 ![](./screenshots/screenshot-featured.png)
+
+---
 
 ![](./screenshots/screenshot-category-filter.png)
 
