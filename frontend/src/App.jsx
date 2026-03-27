@@ -231,10 +231,7 @@ export default function App() {
   const [universeId, setUniverseId]       = useState('')
   const [isLoading, setIsLoading]         = useState(false)
   const [error, setError]                 = useState('')
-  const [history, setHistory]             = useState(() => {
-    try { return JSON.parse(localStorage.getItem('pun_history') || '[]') }
-    catch { return [] }
-  })
+  const [history, setHistory] = useState([])
   const [viewMode, setViewMode]           = useState('grid')
   const [toast, setToast]                 = useState(null)
   const [sidebarOpen, setSidebarOpen]     = useState(false)
@@ -250,21 +247,16 @@ export default function App() {
 
   // ── Check backend health on mount ────────────────────────────────────────
   useEffect(() => {
-    const checkHealth = async () => {
+    const fetchHistory = async () => {
       try {
-        const res = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(5000) })
+        const res = await fetch(`${API_BASE}/history`)
         const data = await res.json()
-        setHealthStatus(data)
-        if (data.status === 'error') {
-          showToast('⚠ Backend unreachable — is Ollama running?', 'error')
-        } else if (!data.model_loaded) {
-          showToast('⚠ Model not loaded — run: ollama pull mistral:7b-instruct', 'error')
-        }
+        setHistory(data.history || [])
       } catch {
-        setHealthStatus({ status: 'error' })
+        log.error?.('Could not load history from backend')
       }
     }
-    checkHealth()
+    fetchHistory()
   }, [])
 
   // ── Persist history to localStorage ──────────────────────────────────────
@@ -319,7 +311,12 @@ export default function App() {
         timestamp: new Date().toLocaleTimeString(),
         generationTime: elapsed,
       }
-      setHistory(prev => [historyItem, ...prev.filter(h => h.event !== data.event)].slice(0, 20))
+      setHistory(prev => [historyItem, ...prev.filter(h => h.event !== data.event)].slice(0, 50))
+      fetch(`${API_BASE}/history`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(historyItem),
+      }).catch(() => {})
 
       showToast(`✦ ${data.headlines.length} headlines from ${data.universe_id}`, 'success')
 
@@ -372,6 +369,7 @@ export default function App() {
   // ── Clear history ─────────────────────────────────────────────────────────
   const handleClearHistory = () => {
     setHistory([])
+    fetch(`${API_BASE}/history`, { method: 'DELETE' }).catch(() => {})
     showToast('Timeline archive cleared.', 'info')
   }
 
